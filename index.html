@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#030710">
+<title>Turnover Screener</title>
+<script>
+// 主题初始化（防闪烁,需保持在 head 内联）：localStorage > 系统偏好
+(function () {
+  var t = null;
+  try { t = localStorage.getItem("ts-theme"); } catch (e) {}
+  if (!t) { var h = new Date().getHours(); t = (h >= 18 || h < 8) ? "dark" : "light"; }
+  document.documentElement.dataset.theme = t;
+})();
+</script>
+<!--
+  A股换手率 + 行业分类 一键筛选网页（自适应:电脑表格 / 手机卡片）
+  纯静态,JSONP 跨域取数,可本地双击使用,也可部署任意 https 静态托管分享。
+
+  工程结构（经典 script 按顺序加载,共享全局作用域;不用 ES module 以兼容 file://）：
+    assets/screener-core.js     配置、东财 JSONP 取数、主题、分享、工具函数
+    assets/screener-metrics.js  自定义指标注册表、指标 UI、指标过滤
+    assets/screener-app.js      筛选、渲染（表格+卡片）、事件、初始化
+
+  URL 参数: ?tmin=8&cmin=-8&cmax=-5&industry=半导体&auto=1
+-->
+<link rel="stylesheet" href="assets/screener.css">
+</head>
+<body data-tab="stock" data-empty="0">
+<div class="container">
+
+<header>
+  <div class="brand">
+    <!-- 极简线框牛头：stroke 风格，小尺寸下线条清晰 -->
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-label="alpha-finder" class="brandLogo"
+         stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <!-- 左牛角：向上弯曲 -->
+      <path d="M8 11 C 6 5, 5 4, 7 7"/>
+      <!-- 右牛角：向上弯曲，比左角略高 → 右上倾 = 上涨 -->
+      <path d="M16 11 C 19 5, 20 4, 18 7"/>
+      <!-- 牛头轮廓：圆角矩形 -->
+      <path d="M6 11 Q6 9 8 9 L16 9 Q18 9 18 11 L18 19 Q18 21 16 21 L8 21 Q6 21 6 19 Z"/>
+    </svg>
+    <span class="brandName">alpha-finder</span>
+    <span class="pageTitle">Turnover Screener</span>
+  </div>
+  <div class="hdrRight">
+    <span class="hdrNote">数据源：东方财富 · 仅作客观数据筛选，不构成投资建议</span>
+    <span id="srcBadge" class="srcBadge">未查询</span>
+    <button class="iconBtn" id="shareBtn" title="分享" aria-label="分享">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="m16 6-4-4-4 4"/><path d="M12 2v13"/></svg>
+    </button>
+    <button class="iconBtn" id="themeBtn" title="切换明暗主题" aria-label="切换明暗主题"></button>
+  </div>
+</header>
+
+<div class="panel open" id="filterPanel">
+  <button class="filtersToggle" id="filtersToggle">
+    筛选条件
+    <span class="sum" id="filterSum"></span>
+    <span class="arrow">▾</span>
+  </button>
+  <div class="filtersBody">
+    <div class="row">
+      <div class="field"><span>换手率 %</span>
+        <input type="number" id="tMin" value="8" placeholder="最低" min="0" step="0.5" inputmode="decimal" style="width:76px"> —
+        <input type="number" id="tMax" placeholder="最高" min="0" step="0.5" inputmode="decimal" style="width:76px">
+      </div>
+      <div class="field"><span>涨跌幅 %</span>
+        <input type="number" id="cMin" value="-8" placeholder="最低" step="0.5" inputmode="decimal" style="width:76px"> —
+        <input type="number" id="cMax" value="-5" placeholder="最高" step="0.5" inputmode="decimal" style="width:76px">
+      </div>
+      <div class="field"><span>行业</span>
+        <select id="industrySel" style="width:150px" disabled title="先执行一键查询，再按行业筛选"><option value="">全部行业</option></select>
+      </div>
+      <div class="field"><span>板块</span>
+        <div class="msel" id="boardSel" style="width:150px">
+          <button type="button" class="mselBtn" disabled title="板块列表加载中…">全部板块</button>
+          <div class="mselPanel">
+            <div class="mselBar">
+              <input type="text" class="mselSearch" placeholder="搜索板块…" enterkeyhint="search">
+              <button type="button" class="mselClear">清空</button>
+            </div>
+            <div class="mselList"><div class="mselEmpty">板块列表加载中…</div></div>
+            <div class="mselFoot"><span class="mselCount">已选 0</span><span>多选 = 命中任一板块</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="field"><span>业务范围</span>
+        <input type="text" id="scopeKw" placeholder="关键词 如:锂电" enterkeyhint="search" style="width:110px">
+      </div>
+      <div class="field"><span>搜索</span>
+        <input type="text" id="kw" placeholder="代码 / 名称" enterkeyhint="search" style="width:170px">
+      </div>
+    </div>
+    <div class="row" style="margin-top:16px">
+      <div class="field mkts"><span>市场</span>
+        <label><input type="checkbox" class="mkt" value="m:1+t:2" checked>沪主板</label>
+        <label><input type="checkbox" class="mkt" value="m:0+t:6" checked>深主板</label>
+        <label><input type="checkbox" class="mkt" value="m:0+t:80" checked>创业板</label>
+        <label><input type="checkbox" class="mkt" value="m:1+t:23" checked>科创板</label>
+        <label><input type="checkbox" class="mkt" value="m:0+t:81+s:2048">北交所</label>
+      </div>
+      <label class="chk"><input type="checkbox" id="noST" checked>剔除 ST / 退市</label>
+      <label class="chk"><input type="checkbox" id="noSuspend" checked>剔除停牌</label>
+      <button class="pill" id="goBtn">一键查询</button>
+    </div>
+    <div class="row" style="margin-top:16px">
+      <div class="field"><span>自定义指标</span>
+        <select id="metricAdd" style="width:160px"></select>
+      </div>
+    </div>
+    <div id="metricsBox"></div>
+    <div id="progressWrap">
+      <div id="progressBar"><i></i></div>
+      <div id="status"><span id="statusTxt"></span><button id="cancelBtn">取消</button></div>
+    </div>
+  </div>
+</div>
+
+<div class="panel results" id="resultsPanel">
+  <div class="toolbar">
+    <div class="meta">
+      <div class="tabs">
+        <button id="tabStock" class="on">个股明细</button>
+        <button id="tabInd">行业汇总</button>
+      </div>
+      <span>共 <span id="count">0</span> 只符合条件</span>
+      <span id="sentiBadge" class="sentiBadge" style="display:none"></span>
+      <span id="capNote" style="display:none">表格仅渲染前 500 行，导出 CSV 含全部结果</span>
+      <span class="metaSpacer"></span>
+      <span class="hint">点击列头排序 · 点击行业标签快速筛选</span>
+      <span id="srcBadgeM" class="srcBadge"></span>
+      <button class="ghost" id="csvBtn" style="display:none">导出 CSV</button>
+    </div>
+    <div class="sortBar" id="sortBar"></div>
+  </div>
+
+  <div class="tblWrap" id="stockWrap">
+    <table id="stockTbl">
+      <thead><tr></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="tblWrap" id="indWrap">
+    <table id="indTbl">
+      <thead><tr>
+        <th class="l" data-k="name">行业</th><th data-k="n">股票数</th>
+        <th data-k="avgT">平均换手率 %</th><th data-k="avgC">平均涨跌幅 %</th>
+        <th data-k="upN">上涨家数</th><th data-k="amount">总成交额</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div id="list"></div>
+  <div id="indList"></div>
+  <button id="moreBtn">加载更多</button>
+  <div class="empty" id="emptyHint">设置条件后点【一键查询】<br>数据来自东方财富，仅作客观筛选，不构成投资建议</div>
+</div>
+
+</div>
+<div id="toast"></div>
+
+<!-- 个股分析弹窗（screener-analysis.js） -->
+<div id="anaModal">
+  <div class="anaBox">
+    <div id="anaHead"></div>
+    <div id="anaBody"></div>
+  </div>
+</div>
+
+<script src="assets/screener-core.js"></script>
+<script src="assets/screener-metrics.js"></script>
+<script src="assets/screener-app.js"></script>
+<script src="assets/screener-analysis.js"></script>
+</body>
+</html>
